@@ -5,7 +5,9 @@ Two properties matter for this service:
 * ``get_or_load`` collapses concurrent misses for the same key into a single
   upstream call, so a burst of dashboard refreshes costs one bigmodel request.
 * entries stay readable for ``stale_ttl`` seconds past expiry, which lets the
-  service keep answering when the upstream is briefly unavailable.
+  service keep answering when the upstream is briefly unavailable. Failures that
+  mean "this request was never legitimate" opt out of that fallback by setting
+  ``allow_stale = False`` on the exception (see ``InvalidTokenError``).
 """
 
 from __future__ import annotations
@@ -187,7 +189,10 @@ class TTLCache:
             if isinstance(exc, asyncio.CancelledError):
                 self._finish(key, future, _Outcome(error=exc))
                 raise
-            if _usable_as_stale(entry, self._clock(), max_age):
+            # A failed load may fall back to the expired-but-still-readable entry —
+            # unless the failure opts out. Auth errors do (``allow_stale = False``):
+            # an expired token must surface, not be papered over with an old number.
+            if getattr(exc, "allow_stale", True) and _usable_as_stale(entry, self._clock(), max_age):
                 self._finish(key, future, _Outcome(value=entry.value))
                 return entry.value, STALE
             self._finish(key, future, _Outcome(error=exc))

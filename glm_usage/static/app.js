@@ -63,8 +63,12 @@ async function getJSON(url) {
   try { body = await res.json(); } catch (_) { /* non-JSON error page */ }
   if (!res.ok) {
     const msg = body && body.error ? (body.error.message || body.error.type) : res.status + " " + res.statusText;
-    if (res.status === 401 && !key) {
-      throw new Error(msg + "；如已设置 GLM_USAGE_API_KEY，请用 " + window.location.pathname + "?key=你的密钥 打开一次本页");
+    const type = body && body.error ? body.error.type : "";
+    // 认证失败两种：没带 key（403 forbidden）、带了但不对（401 unauthorized）。
+    // 服务端只回一句泛化的"未授权"（不点名 header / ?key=，免得被扫描器当路标），
+    // 所以给人看的提示放这儿。注意上游 token 缺失/过期也是 401，但类型不同，要原样透出。
+    if (type === "unauthorized" || type === "forbidden") {
+      throw new Error("未授权：请用 " + window.location.pathname + "?key=你的密钥 打开一次本页（换过密钥也要重新打开一次）");
     }
     throw new Error(msg);
   }

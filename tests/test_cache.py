@@ -7,6 +7,7 @@ import asyncio
 import pytest
 
 from glm_usage.cache import COALESCED, HIT, MISS, STALE, IntervalGate, TTLCache
+from glm_usage.client import InvalidTokenError
 
 
 async def test_miss_then_hit() -> None:
@@ -79,6 +80,23 @@ async def test_stale_value_is_served_when_loader_fails() -> None:
         raise RuntimeError("upstream down")
 
     assert await cache.get_or_load("k", failing) == ("fresh", STALE)
+
+
+async def test_auth_failure_never_falls_back_to_stale() -> None:
+    """鉴权错误 opt out 了 stale 兜底（``allow_stale = False``），必须原样抛出去。"""
+    cache = TTLCache(0.01, stale_ttl=60)
+
+    async def loader() -> str:
+        return "fresh"
+
+    await cache.get_or_load("k", loader)
+    await asyncio.sleep(0.02)
+
+    async def rejected() -> str:
+        raise InvalidTokenError("token 已过期")
+
+    with pytest.raises(InvalidTokenError):
+        await cache.get_or_load("k", rejected)
 
 
 async def test_stale_window_ends() -> None:

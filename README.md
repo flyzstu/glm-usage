@@ -11,7 +11,7 @@ pip install -e ".[dev]"          # 或: pip install sanic httpx orjson uvloop
 
 export BIGMODEL_TOKEN='<bigmodel_token_production 的值>'
 ./run.sh                          # 等价于 python3 -m glm_usage
-# 打开 http://127.0.0.1:8000/dashboard
+# 打开 http://127.0.0.1:8000/dashboard（设了 GLM_USAGE_API_KEY 就带上 ?key=你的密钥，开一次即可）
 ```
 
 取 token：登录 bigmodel.cn → F12 → Application → Cookies → `https://bigmodel.cn` → 复制 `bigmodel_token_production`。
@@ -28,7 +28,7 @@ export BIGMODEL_TOKEN_FILE=/etc/glm-usage/token
 ```bash
 cp .env.example .env      # 填入 BIGMODEL_TOKEN
 docker-compose up -d      # 构建并启动，默认映射 8000
-# 打开 http://127.0.0.1:8000/dashboard
+# 打开 http://127.0.0.1:8000/dashboard（.env 里设了 GLM_USAGE_API_KEY 就带上 ?key=你的密钥，开一次即可）
 ```
 
 镜像以非 root（uid 10001）运行，根文件系统只读 + `no-new-privileges` + `/tmp` tmpfs，自带 `/healthz` 健康检查，日志按 3×10MB 轮转。容器能接收 SIGTERM 优雅退出（实测 `docker stop` 约 0.2s）。
@@ -50,7 +50,7 @@ docker-compose up -d      # 构建并启动，默认映射 8000
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/dashboard` | 可视化看板（纯静态，无外链依赖）。**故意不在根路径**，方便按路径加授权；`/` 会 302 跳到这里 |
-| GET | `/healthz` | 存活探针 + token 是否就绪、刷新间隔 |
+| GET | `/healthz` | 存活探针 + token 是否就绪、是否被上游拒绝、刷新间隔。恒返 200，状态看 body 的 `status` 字段 |
 | GET | `/api/v1/summary` | 一行搞定：5 小时额度、周额度、总积分、缓存命中率（时间均为 CST） |
 | GET | `/api/v1/quota` | 5 小时额度 + 周额度 |
 | GET | `/api/v1/usage` | 各模型积分/Token 消耗 |
@@ -123,11 +123,13 @@ curl -s 'http://127.0.0.1:8000/api/v1/summary'
 
 ### 授权
 
-面板和 API 是两条独立路径，可以分别授权：
+面板和 API 是两条路径，同一个 `GLM_USAGE_API_KEY`：
 
-- **面板 `/dashboard`**：本服务不拦它（HTML 本身不含数据）。要保护就在反向代理（Nginx / Nginx Proxy Manager 的 Access List）按 `/dashboard` 前缀加 basic auth。想换路径设 `GLM_USAGE_DASHBOARD_PATH`，`/` 会自动 302 过去。
-- **API `/api/*`**：设 `GLM_USAGE_API_KEY` 后必须带 `X-API-Key` 请求头；也接受 `?key=`，方便浏览器。
-- 两者都开了时，用 `http://host:8000/dashboard?key=你的密钥` 打开一次：看板把密钥存进 localStorage 并**立刻从地址栏抹掉**，之后所有请求只走请求头。
+- **面板 `/dashboard`**（含 `/dashboard/static/*`）：设了 key 之后**同样要带**——没带就直接 403，连 HTML / JS / CSS 都不返回。API 那边已经不透露认证方式了，但 `app.js` 里写着 `?key=`，所以资源本身也得拦住。想换路径设 `GLM_USAGE_DASHBOARD_PATH`，`/` 会自动 302 过去。
+- **API `/api/*`**：必须带 `X-API-Key` 请求头；也接受 `?key=`，方便浏览器。没带 key 返回 **403** `forbidden`，带了但不对返回 **401** `unauthorized`——两者 body 都只有一句"未授权"，不回显认证方式。
+- 首次用 `http://host:8000/dashboard?key=你的密钥` 打开：前端把密钥存进 localStorage 并**立刻从地址栏抹掉**（之后 API 调用只走 `X-API-Key`），服务端同时种一个 **HttpOnly cookie**（`glm_usage_key`，30 天）——刷新页面是顶层导航，带不了自定义请求头，面板自身和静态资源就靠它进门。
+- cookie 由 `Path=/dashboard` 限定，只跟着面板走；API **不认 cookie**，只认请求头 / `?key=`。
+- 不设 `GLM_USAGE_API_KEY` 时上面这些都不生效（面板和 API 都开放），行为和以前一致。
 
 响应统一信封，`meta.cacheState` 就是 `X-Cache` 响应头的值：
 
@@ -146,7 +148,7 @@ curl -s 'http://127.0.0.1:8000/api/v1/summary'
 { "error": { "type": "invalid_token", "message": "token 无效或已过期（code 1001）…" } }
 ```
 
-`type` 取值：`missing_token` / `invalid_token`（401）、`invalid_request`（400）、`upstream_unavailable`（502）、`upstream_timeout`（504）。
+`type` 取值：`missing_token` / `invalid_token`（401，上游 token 的问题）、`forbidden`（403，本服务的 API key 没带）、`unauthorized`（401，API key 不对）、`invalid_request`（400）、`upstream_unavailable`（502）、`upstream_timeout`（504）。
 
 ## 多账号 / 调用方自带 token
 
@@ -166,7 +168,7 @@ curl -H "Authorization: $TOKEN" http://127.0.0.1:8000/api/v1/quota
 
 1. **请求合并（single-flight）**：并发未命中同一 key 时只回源一次，其余请求共享结果（`X-Cache: COALESCED`）。看板刷新、多个终端同时拉数据都只花上游一次调用。
 2. **稳定的缓存键**：未显式传时间窗时，`endTime` 对齐到当前整点的 `59:59`（上游数据本就是按天聚合的）。如果直接用“当前秒级时刻”，每个请求都是新 key，缓存会完全失效——这不是猜测，是压测里发现的真实缺陷，修复后 `/api/v1/overview` 吞吐提升 2.8 倍、回源次数下降近两个数量级。
-3. **分级 TTL 缓存 + stale 兜底**：quota 60s、usage/activity/performance 300s；条目过期后 `GLM_USAGE_STALE_TTL`（默认 10 分钟）内若上游报错，继续用旧值并标记 `X-Cache: STALE`——每个响应还会带 `meta.ageSeconds`，旧数据不会"静默"。
+3. **分级 TTL 缓存 + stale 兜底**：quota 60s、usage/activity/performance 300s；条目过期后 `GLM_USAGE_STALE_TTL`（默认 10 分钟）内若上游报错，继续用旧值并标记 `X-Cache: STALE`——每个响应还会带 `meta.ageSeconds`，旧数据不会"静默"。**唯一的例外是鉴权失败**：token 过期/无效时不做 stale 兜底，直接把 401 透出去，否则旧数字会把"token 挂了"这件事糊过去。
 4. **连接池复用**：单进程共享一个 `httpx.AsyncClient`（keep-alive 30s，默认 32 连接）；`overview` 用 `asyncio.gather` 并发三个上游请求。
 5. **快路径**：uvloop（Sanic 检测到即自动启用）、orjson 序列化、看板 HTML 常驻内存。
 6. **不给自己挖坑的闸门**：`?refresh=1` 每 key 30 秒只放行一次；收到 429 时按上游的 `Retry-After` 退避（超过 5 秒就直接失败，不把连接挂着）。
@@ -203,7 +205,7 @@ curl -H "Authorization: $TOKEN" http://127.0.0.1:8000/api/v1/quota
 | `GLM_USAGE_QUOTA_TTL` | `60` | 额度缓存秒数（文档建议上游采集间隔 ≥ 60s，站点有 WAF） |
 | `GLM_USAGE_USAGE_TTL` / `ACTIVITY_TTL` / `PERFORMANCE_TTL` | `300` | 用量/活跃度/健康度缓存秒数 |
 | `GLM_USAGE_ACCOUNT_TTL` | `3600` | 套餐与账户缓存秒数（很少变） |
-| `GLM_USAGE_STALE_TTL` | `600` | 上游故障时旧值可用时长（宁可报错也别把旧数据当当前值） |
+| `GLM_USAGE_STALE_TTL` | `600` | 上游故障时旧值可用时长（鉴权失败不走这条兜底；宁可报错也别把旧数据当当前值） |
 | `GLM_USAGE_REFRESH_MIN_INTERVAL` | `30` | 同一把 key 两次 `?refresh=1` 之间的最小间隔，0 = 不限制 |
 | `GLM_USAGE_RETRIES` | `2` | 5xx/超时的重试次数（指数退避 + 抖动） |
 | `GLM_USAGE_REQUEST_TIMEOUT` | `15` | 上游超时（秒） |
@@ -237,12 +239,12 @@ python3 -m pytest -q     # 130 项
 ruff check .             # 与 CI 同一套规则
 ```
 
-覆盖：缓存命中/过期/stale/请求合并/取消传染/maxAge 上限、`?refresh` 节流闸门、时间窗口解析与边界、查询串 `%20` 编码、上游错误码与 `Retry-After`、鉴权（`X-API-Key` 与 `?key=`）、日志脱敏、token 文件热重载、入口 AppLoader 目标可解析，以及 `/api/v1/*` 全链路（上游用 `httpx.MockTransport` 伪造，不发真实网络请求）。CI 见 `.github/workflows/ci.yml`。
+覆盖：缓存命中/过期/stale/请求合并/取消传染/maxAge 上限、`?refresh` 节流闸门、时间窗口解析与边界、查询串 `%20` 编码、上游错误码与 `Retry-After`、鉴权（`X-API-Key` 与 `?key=`，以及 401 不回显认证方式）、鉴权失败不吃 stale 兜底、`/healthz` 的上游鉴权标志、日志脱敏、token 文件热重载、入口 AppLoader 目标可解析，以及 `/api/v1/*` 全链路（上游用 `httpx.MockTransport` 伪造，不发真实网络请求）。CI：`.gitea/workflows/build-image.yaml` 构建并推送镜像；`.github/workflows/ci.yml` 是 lint + pytest（Gitea 目前只注册了前者）。
 
 ## 注意
 
 - 这些是 bigmodel 网页内部接口，不属于官方公开 API，路径与字段可能随官网改版变化。
-- JWT 有效期有限。上游的鉴权失败是 **HTTP 200 + body 里的错误码**，实测两种：`code 1001`（没带 Authorization 头）和 `code 401`（token 过期或无效）。两者都会被本服务识别为 401 `invalid_token` 并带上上游原文，重新登录取新 token 即可——注意别把它当成 502，那通常意味着上游真的出问题了。
+- JWT 有效期有限。上游的鉴权失败是 **HTTP 200 + body 里的错误码**，实测两种：`code 1001`（没带 Authorization 头）和 `code 401`（token 过期或无效）。两者都会被本服务识别为 401 `invalid_token` 并带上上游原文，重新登录取新 token 即可——注意别把它当成 502，那通常意味着上游真的出问题了。这类失败**不享受 stale 兜底**（不会拿过期前的数字假装正常），并且会让 `/healthz` 的 `status` 变成 `degraded`、`upstreamAuth.rejected` 置 true（HTTP 仍是 200，不会触发容器重启）——只要之后有任何一次上游调用成功，它就自动恢复。
 - `/api/v1/account` 会返回账户标识信息（客户 ID、邮箱等）。对外暴露时记得设置 `GLM_USAGE_API_KEY`。
 - 上游站点有 WAF，文档建议采集间隔 ≥ 60 秒；默认各档缓存 TTL 已按此设计，调小前请自行评估限流风险。
 - 服务只读，不会修改任何上游数据。

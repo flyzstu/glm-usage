@@ -47,6 +47,34 @@ def test_healthz_reports_missing_token(client_for) -> None:
 def test_healthz_is_ok_with_a_token(client: SanicTestClient) -> None:
     _, response = client.get("/healthz")
     assert response.json["status"] == "ok"
+    assert response.json["upstreamAuth"] == {"rejected": False, "rejections": 0}
+
+
+def test_healthz_flags_a_token_the_upstream_rejects(client: SanicTestClient, upstream: FakeUpstream) -> None:
+    upstream.auth_error_paths.add(QUOTA_PATH)
+    assert client.get("/api/v1/quota")[1].status == 401
+
+    _, response = client.get("/healthz")
+    # 仍然 200：token 过期不该让编排器反复重启容器，但 body 要说实话
+    assert response.status == 200
+    assert response.json["status"] == "degraded"
+    assert response.json["upstreamAuth"]["rejected"] is True
+    assert response.json["upstreamAuth"]["rejections"] == 1
+    assert response.json["upstreamAuth"]["rejectedAgoSeconds"] >= 0
+
+
+def test_healthz_recovers_once_an_upstream_call_succeeds(client: SanicTestClient, upstream: FakeUpstream) -> None:
+    upstream.auth_error_paths.add(QUOTA_PATH)
+    assert client.get("/api/v1/quota")[1].status == 401
+    assert client.get("/healthz")[1].json["status"] == "degraded"
+
+    upstream.auth_error_paths.clear()
+    assert client.get("/api/v1/usage")[1].status == 200
+
+    _, response = client.get("/healthz")
+    assert response.json["status"] == "ok"
+    # 累计次数保留，只清"最近一次判定"
+    assert response.json["upstreamAuth"] == {"rejected": False, "rejections": 1}
 
 
 def test_quota_is_cached_between_requests(client: SanicTestClient, upstream: FakeUpstream) -> None:
@@ -104,6 +132,19 @@ def test_stale_cache_is_served_when_upstream_fails(client_for, upstream: FakeUps
     assert response.status == 200
     assert response.headers["x-cache"] == "STALE"
     assert response.json["data"]["level"] == "lite"
+
+
+def test_expired_token_is_not_papered_over_with_stale_data(client_for, upstream: FakeUpstream) -> None:
+    """上游挂了可以拿旧值顶一会儿，token 过期不行——那是必须让调用方看见的状态。"""
+    client = client_for(quota_ttl=0.05, stale_ttl=30.0, retries=0)
+    assert client.get("/api/v1/quota")[1].status == 200
+
+    time.sleep(0.1)
+    upstream.auth_error_paths.add(QUOTA_PATH)
+
+    _, response = client.get("/api/v1/quota")
+    assert response.status == 401
+    assert response.json["error"]["type"] == "invalid_token"
 
 
 def test_usage_matches_documented_query_string(client: SanicTestClient, upstream: FakeUpstream) -> None:
@@ -199,10 +240,29 @@ def test_overview_reports_502_when_everything_fails(client_for, upstream: FakeUp
 def test_api_key_guard(client_for) -> None:
     client = client_for(api_key="s3cret")
 
-    assert client.get("/api/v1/quota")[1].status == 401
+    # 没带 key → 403；带了但不对 → 401
+    assert client.get("/api/v1/quota")[1].status == 403
     assert client.get("/api/v1/quota", headers={"X-API-Key": "wrong"})[1].status == 401
     assert client.get("/api/v1/quota", headers={"X-API-Key": "s3cret"})[1].status == 200
     assert client.get("/healthz")[1].status == 200
+
+
+def test_api_key_rejection_is_opaque(client_for) -> None:
+    """拒绝时不回显认证方式（header 名、?key=），免得给扫描器当路标。"""
+    client = client_for(api_key="s3cret")
+
+    _, missing = client.get("/api/v1/quota")
+    _, wrong = client.get("/api/v1/quota", headers={"X-API-Key": "wrong"})
+
+    assert missing.status == 403
+    assert missing.json["error"]["type"] == "forbidden"
+    assert wrong.status == 401
+    assert wrong.json["error"]["type"] == "unauthorized"
+
+    for response in (missing, wrong):
+        text = str(response.json).lower()
+        for leak in ("api-key", "api_key", "x-api", "?key", "header"):
+            assert leak not in text
 
 
 def test_metrics_endpoint(client: SanicTestClient) -> None:
@@ -492,10 +552,39 @@ def test_dashboard_path_is_configurable(client_for) -> None:
     assert [(h.status_code, h.headers.get("location")) for h in response.history] == [(302, "/admin/usage")]
 
 
+def test_dashboard_requires_the_key(client_for) -> None:
+    """面板的 HTML / JS / CSS 也是资源：没带 key 直接 403，别把 app.js 漏出去。"""
+    client = client_for(api_key="s3cret")
+
+    for path in ("/dashboard", "/dashboard/", "/dashboard/static/app.js", "/dashboard/static/style.css"):
+        assert client.get(path)[1].status == 403
+
+    assert client.get("/healthz")[1].status == 200  # 探针不受影响
+    assert client.get("/dashboard?key=wrong")[1].status == 401
+
+
+def test_dashboard_bootstraps_a_cookie_from_the_query_key(client_for) -> None:
+    """?key= 开一次门就够了：刷新页面是顶层导航，带不了请求头，之后靠 cookie。"""
+    client = client_for(api_key="s3cret")
+
+    _, response = client.get("/dashboard?key=s3cret")
+    assert response.status == 200
+    cookie = response.headers.get("set-cookie", "")
+    assert "glm_usage_key=s3cret" in cookie
+    assert "HttpOnly" in cookie
+
+    allowed = {"Cookie": "glm_usage_key=s3cret"}
+    assert client.get("/dashboard", headers=allowed)[1].status == 200
+    assert client.get("/dashboard/static/app.js", headers=allowed)[1].status == 200
+
+    assert client.get("/dashboard", headers={"Cookie": "glm_usage_key=wrong"})[1].status == 401
+    assert client.get("/dashboard/static/app.js", headers={"Cookie": "glm_usage_key=wrong"})[1].status == 401
+
+
 def test_api_key_accepts_the_query_parameter(client_for) -> None:
     client = client_for(api_key="s3cret")
 
-    assert client.get("/api/v1/quota")[1].status == 401
+    assert client.get("/api/v1/quota")[1].status == 403
     assert client.get("/api/v1/quota?key=wrong")[1].status == 401
     assert client.get("/api/v1/quota?key=s3cret")[1].status == 200
 

@@ -55,6 +55,10 @@ class BigModelError(Exception):
 
     status = 502
     kind = "upstream_error"
+    # A failed refresh normally falls back to the cache's expired-but-readable entry.
+    # Errors that mean "this request was never legitimate" opt out (see the auth ones
+    # below), because serving an old number would hide the problem instead of showing it.
+    allow_stale = True
 
     def __init__(self, message: str, *, code: Any = None, status: int | None = None) -> None:
         super().__init__(message)
@@ -73,11 +77,13 @@ class BigModelError(Exception):
 class MissingTokenError(BigModelError):
     status = 401
     kind = "missing_token"
+    allow_stale = False
 
 
 class InvalidTokenError(BigModelError):
     status = 401
     kind = "invalid_token"
+    allow_stale = False
 
 
 class UpstreamUnavailable(BigModelError):
@@ -255,8 +261,8 @@ class BigModelClient:
                 if error is None:
                     try:
                         data = self._decode(response)
-                    except BigModelError:
-                        self._observe(started, error=True)
+                    except BigModelError as exc:
+                        self._observe(started, error=True, failure=exc)
                         raise
                     self._observe(started, error=False)
                     return data
@@ -265,7 +271,7 @@ class BigModelClient:
                 hint = retry_after_seconds(response)
                 if hint is not None:
                     if hint > MAX_RETRY_AFTER:
-                        self._observe(started, error=True)
+                        self._observe(started, error=True, failure=error)
                         raise UpstreamUnavailable(
                             f"bigmodel 触发了限流（HTTP {response.status_code}），"
                             f"要求 {hint:.0f} 秒后重试，本次不再重试",
@@ -274,7 +280,7 @@ class BigModelClient:
                     failure = UpstreamUnavailable(f"{error}；上游要求 {hint:.0f} 秒后重试", code=error.code)
                     delay = hint
 
-            self._observe(started, error=True)
+            self._observe(started, error=True, failure=failure)
             if not retryable or attempt + 1 >= attempts:
                 break
             await asyncio.sleep(delay if delay is not None else self._backoff(attempt))
@@ -285,9 +291,16 @@ class BigModelClient:
         base = self._settings.retry_backoff * (2**attempt)
         return min(base * (0.5 + random.random()), 5.0)
 
-    def _observe(self, started: float, *, error: bool) -> None:
-        if self._metrics is not None:
-            self._metrics.record_upstream((time.perf_counter() - started) * 1000, error=error)
+    def _observe(self, started: float, *, error: bool, failure: BigModelError | None = None) -> None:
+        """Counters, plus the upstream's latest auth verdict (reported by ``/healthz``)."""
+        if self._metrics is None:
+            return
+        self._metrics.record_upstream((time.perf_counter() - started) * 1000, error=error)
+        if not error:
+            # Any call that gets through means the token is good again.
+            self._metrics.record_auth_success()
+        elif isinstance(failure, (InvalidTokenError, MissingTokenError)):
+            self._metrics.record_auth_failure()
 
     @staticmethod
     def _status_error(response: httpx.Response) -> BigModelError | None:

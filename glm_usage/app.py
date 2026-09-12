@@ -21,6 +21,10 @@ from .timerange import BadRequest
 
 STATIC_DIR = Path(__file__).parent / "static"
 APP_NAME = "glm_usage"
+# ?key= 只用来"开一次门"：进门时种下这个 cookie，此后面板自己的 HTML / JS / CSS
+# 都认它——刷新页面是顶层导航，带不了 X-API-Key 请求头，光靠 ?key= 会一刷新就 403。
+DASHBOARD_COOKIE = "glm_usage_key"
+DASHBOARD_COOKIE_MAX_AGE = 30 * 24 * 3600
 
 
 def normalise_path(raw: str) -> str:
@@ -41,6 +45,7 @@ def create_app(
     touching the network.
     """
     settings = settings or Settings.from_env()
+    dashboard_path = normalise_path(settings.dashboard_path)
     app = Sanic(name)
     app.config.FALLBACK_ERROR_FORMAT = "json"
     app.config.DEBUG = settings.debug
@@ -83,20 +88,47 @@ def create_app(
     async def _close_upstream(app: Sanic) -> None:
         await app.ctx.client.close()
 
+    def presented_key(request: Request, *, allow_cookie: bool = False) -> str:
+        """Header first, then ``?key=``; the cookie only counts for the dashboard."""
+        key = request.headers.get("x-api-key") or request.get_args().get("key") or ""
+        if not key and allow_cookie:
+            key = request.cookies.get(DASHBOARD_COOKIE) or ""
+        return key
+
+    def rejection(provided: str) -> BaseHTTPResponse:
+        """Opaque denial: naming the header or ``?key=`` would hand scanners a map.
+
+        Nothing presented at all (the usual scanner pose) is a 403; something that
+        simply does not match is a 401. Both bodies are the same one-liner.
+        """
+        missing = not provided
+        return json_response(
+            {"error": {"type": "forbidden" if missing else "unauthorized", "message": "未授权"}},
+            status=403 if missing else 401,
+        )
+
     @app.on_request
     async def _require_api_key(request: Request) -> BaseHTTPResponse | None:
         expected = settings.api_key
         if not expected or not request.path.startswith("/api/"):
             return None
-        # The header is the normal way; ?key= exists so a browser can bootstrap
-        # the dashboard, which then keeps it in localStorage and stops using the URL.
-        provided = request.headers.get("x-api-key") or request.get_args().get("key") or ""
-        if not secrets.compare_digest(provided, expected):
-            return json_response(
-                {"error": {"type": "unauthorized", "message": "缺少或错误的 X-API-Key（也可用 ?key=）"}},
-                status=401,
-            )
-        return None
+        provided = presented_key(request)
+        return None if secrets.compare_digest(provided, expected) else rejection(provided)
+
+    @app.on_request
+    async def _require_dashboard_key(request: Request) -> BaseHTTPResponse | None:
+        """The dashboard bundle is a resource too: no key, no HTML / JS / CSS.
+
+        The API says nothing about the auth scheme, so serving ``app.js`` (which
+        spells out ``?key=``) to anonymous callers would leak it right back out.
+        """
+        expected = settings.api_key
+        if not expected:
+            return None
+        if request.path != dashboard_path and not request.path.startswith(f"{dashboard_path}/"):
+            return None
+        provided = presented_key(request, allow_cookie=True)
+        return None if secrets.compare_digest(provided, expected) else rejection(provided)
 
     @app.on_response
     async def _record(request: Request, response: BaseHTTPResponse) -> None:
@@ -125,22 +157,27 @@ def create_app(
     async def healthz(request: Request) -> BaseHTTPResponse:
         """Liveness probe plus the small amount of config the UI needs.
 
-        Stays HTTP 200 even when ``degraded`` so a missing token never makes the
-        orchestrator restart-loop the container — but the body tells the truth,
-        and ``token.source`` distinguishes "not configured" from "misconfigured".
+        Stays HTTP 200 even when ``degraded`` so a missing or expired token never
+        makes the orchestrator restart-loop the container — but the body tells the
+        truth: ``token.source`` distinguishes "not configured" from "misconfigured",
+        and ``upstreamAuth.rejected`` means bigmodel turned the token down (it
+        clears itself as soon as any upstream call succeeds again).
         """
         tokens: TokenStore = request.app.ctx.tokens
+        metrics: Metrics = request.app.ctx.metrics
         try:
             resolve_token(request)
             configured = True
         except BigModelError:
             configured = False
+        auth = metrics.auth_state()
         return json_response(
             {
-                "status": "ok" if configured else "degraded",
+                "status": "ok" if configured and not auth["rejected"] else "degraded",
                 "version": settings.version,
-                "uptimeSeconds": round(request.app.ctx.metrics.snapshot()["uptimeSeconds"], 3),
+                "uptimeSeconds": round(metrics.snapshot()["uptimeSeconds"], 3),
                 "token": {"configured": configured, "source": tokens.source},
+                "upstreamAuth": auth,
                 "upstream": settings.base_url,
                 "refreshSeconds": settings.dashboard_refresh_seconds,
             }
@@ -150,14 +187,28 @@ def create_app(
 
     # 面板故意不挂在根路径：/ 只做跳转，这样反代或中间件可以按
     # /dashboard 这个前缀单独加授权，而不会连带影响 API。
-    dashboard_path = normalise_path(settings.dashboard_path)
     dashboard_html = (STATIC_DIR / "index.html").read_text(encoding="utf-8").replace(
         "{{STATIC}}", f"{dashboard_path}/static"
     )
 
-    async def _dashboard(_request: Request) -> BaseHTTPResponse:
+    async def _dashboard(request: Request) -> BaseHTTPResponse:
         # 渲染好的 HTML 常驻内存：一次读盘，之后零 IO。
-        return html(dashboard_html)
+        response = html(dashboard_html)
+        bootstrap = request.args.get("key") or ""
+        if settings.api_key and bootstrap and secrets.compare_digest(bootstrap, settings.api_key):
+            # 带 ?key= 进来的那一次顺便种 cookie：地址栏随即被前端抹干净，之后刷新
+            # （顶层导航，带不了请求头）靠它进门。httponly —— 前端不需要读它，
+            # API 调用照旧走 X-API-Key（密钥在 localStorage）。secure 保持关闭：
+            # 文档里的 http://127.0.0.1:8000 是本机明文用法，开了浏览器会直接丢掉。
+            response.add_cookie(
+                DASHBOARD_COOKIE,
+                settings.api_key,
+                path=dashboard_path,
+                httponly=True,
+                secure=False,
+                max_age=DASHBOARD_COOKIE_MAX_AGE,
+            )
+        return response
 
     # Sanic 自己会把 /dashboard/ 归到这条路由上（strict_slashes 默认关闭），
     # 重复注册带尾斜杠的版本会直接 RouteExists。
