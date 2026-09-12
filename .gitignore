@@ -11,3 +11,4 @@ venv/
 
 # 里面有 token，不要提交
 .env
+k8s/secret.yaml
