@@ -98,7 +98,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: glm-usage
-        image: coding.fly97.fun:8443/fly97/glm-usage:1.0.0
+        image: coding.fly97.fun:8443/fly97/glm-usage:0.1.1
         imagePullPolicy: IfNotPresent
         ports:
         - name: http

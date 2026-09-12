@@ -6,7 +6,7 @@ services:
       # （100.100.100.100），解析不了 pypi.org；host 网络下直接读宿主的
       # /etc/resolv.conf，pip 才能装依赖。
       network: host
-    image: glm-usage:1.0.0
+    image: glm-usage:0.1.1
     container_name: glm-usage
     restart: unless-stopped
     stop_grace_period: 15s

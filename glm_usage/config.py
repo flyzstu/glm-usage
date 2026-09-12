@@ -92,7 +92,7 @@ class Settings:
     # 面板路径，故意不放在根路径，方便在反代/中间件上按路径授权
     dashboard_path: str = "/dashboard"
 
-    version: str = "1.0.0"
+    version: str = "0.1.1"
 
     @classmethod
     def from_env(cls) -> Settings:
