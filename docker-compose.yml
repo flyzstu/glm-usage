@@ -1,0 +1,58 @@
+services:
+  glm-usage:
+    build:
+      context: .
+      # 构建步骤走宿主网络。本机 dockerd 给构建容器下发的是失效的 Tailscale DNS
+      # （100.100.100.100），解析不了 pypi.org；host 网络下直接读宿主的
+      # /etc/resolv.conf，pip 才能装依赖。
+      network: host
+    image: glm-usage:1.0.0
+    container_name: glm-usage
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+    environment:
+      # 推荐：把 token 写在 .env 里（compose 会自动读取同目录的 .env）
+      BIGMODEL_TOKEN: ${BIGMODEL_TOKEN:-}
+      # 更稳的做法：挂载 token 文件并改用 BIGMODEL_TOKEN_FILE，换 token 不用重启
+      # BIGMODEL_TOKEN_FILE: /run/secrets/bigmodel_token
+
+      # 单 worker：每个 worker 有独立缓存，多开一个就多一份上游调用（实测翻倍），
+      # 而单进程的吞吐早就远超这个面板的需要。
+      GLM_USAGE_WORKERS: ${GLM_USAGE_WORKERS:-1}
+      GLM_USAGE_QUOTA_TTL: ${GLM_USAGE_QUOTA_TTL:-60}
+      GLM_USAGE_USAGE_TTL: ${GLM_USAGE_USAGE_TTL:-300}
+      GLM_USAGE_ACTIVITY_TTL: ${GLM_USAGE_ACTIVITY_TTL:-300}
+      GLM_USAGE_STALE_TTL: ${GLM_USAGE_STALE_TTL:-600}
+      GLM_USAGE_REFRESH_MIN_INTERVAL: ${GLM_USAGE_REFRESH_MIN_INTERVAL:-30}
+      GLM_USAGE_API_KEY: ${GLM_USAGE_API_KEY:-}
+      GLM_USAGE_ACCESS_LOG: ${GLM_USAGE_ACCESS_LOG:-1}
+      GLM_USAGE_DASHBOARD_PATH: ${GLM_USAGE_DASHBOARD_PATH:-/dashboard}
+      GLM_USAGE_SUMMARY_MAX_AGE: ${GLM_USAGE_SUMMARY_MAX_AGE:-300}
+
+    ports:
+      - "${GLM_USAGE_PORT:-8000}:8000"
+
+    # 只读挂载 token 文件（配合上面的 BIGMODEL_TOKEN_FILE 使用）
+    # volumes:
+    #   - ./token:/run/secrets/bigmodel_token:ro
+
+    # 服务只读、无提权，容器里不写任何文件
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

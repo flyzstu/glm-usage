@@ -1,0 +1,74 @@
+:root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1c2129;
+    --border: #2a3038;
+    --fg: #e6edf3;
+    --muted: #8b949e;
+    --accent: #4c8dff;
+    --good: #3fb950;
+    --warn: #d29922;
+    --bad: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    background: var(--bg); color: var(--fg);
+    font: 14px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, sans-serif;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); font-weight: 600; letter-spacing: .04em; }
+  .spacer { flex: 1; }
+  .badge {
+    font-size: 11px; padding: 2px 8px; border-radius: 999px;
+    background: rgba(76,141,255,.15); color: var(--accent); border: 1px solid rgba(76,141,255,.35);
+  }
+  button {
+    background: var(--panel-2); color: var(--fg); border: 1px solid var(--border);
+    padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .muted { color: var(--muted); }
+  .grid { display: grid; gap: 14px; }
+  .cards { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); margin-bottom: 18px; }
+  .stats { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-bottom: 18px; }
+  .card, .stat, .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px;
+  }
+  .stat .k { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+  .stat .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .card-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+  .card-head .t { font-weight: 600; }
+  .card-head .r { margin-left: auto; font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .card .line { font-size: 13px; color: var(--muted); margin-bottom: 10px; font-variant-numeric: tabular-nums; }
+  .card .line b { color: var(--fg); font-size: 15px; }
+  .bar { height: 8px; border-radius: 999px; background: var(--panel-2); overflow: hidden; }
+  .bar > i { display: block; height: 100%; border-radius: 999px; transition: width .4s ease; }
+  .card-foot { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .panel { margin-bottom: 18px; }
+  .chart { display: flex; align-items: flex-end; gap: 3px; height: 160px; padding-top: 8px; }
+  .chart .col { flex: 1; display: flex; align-items: flex-end; justify-content: center; gap: 2px; height: 100%; min-width: 4px; }
+  .chart .col > i {
+    flex: 1; display: block; min-height: 2px;
+    background: linear-gradient(180deg, var(--accent), #2b5fd0); border-radius: 3px 3px 0 0;
+  }
+  .chart .col > i.alt { background: linear-gradient(180deg, #a371f7, #6f42c1); }
+  .chart .col:hover > i { filter: brightness(1.25); }
+  .kv-row { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; font-size: 13px; }
+  .kv-row .k { color: var(--muted); }
+  .axis { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-top: 6px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  tbody tr:last-child td { border-bottom: none; }
+  .banner {
+    background: rgba(210,153,34,.12); border: 1px solid rgba(210,153,34,.4); color: var(--warn);
+    padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; font-size: 13px;
+  }
+  .errors { margin-top: 8px; font-size: 12px; color: var(--bad); white-space: pre-wrap; }
+  .empty { color: var(--muted); padding: 12px 0; }

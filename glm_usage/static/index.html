@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GLM 用量看板</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234c8dff'/%3E%3Ctext x='16' y='23' font-size='19' font-family='sans-serif' font-weight='bold' text-anchor='middle' fill='white'%3EG%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="{{STATIC}}/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>GLM 用量看板</h1>
+    <span class="badge" id="level">--</span>
+    <span class="spacer"></span>
+    <span class="muted" id="updated">加载中…</span>
+    <button id="refresh">刷新</button>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+  <div id="quota" class="grid cards"></div>
+  <div id="stats" class="grid stats"></div>
+
+  <section class="panel">
+    <h2>每日积分消耗</h2>
+    <div id="chart" class="chart"></div>
+    <div id="axis" class="axis"></div>
+  </section>
+
+  <section class="panel">
+    <h2>模型用量</h2>
+    <table>
+      <thead><tr><th>模型</th><th>Tokens</th><th>积分</th><th>占比</th></tr></thead>
+      <tbody id="models"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="panel">
+    <h2>系统健康度（Decode 速度 / 成功率）</h2>
+    <div id="perf-stats" class="grid stats"></div>
+    <div id="perf-chart" class="chart"></div>
+    <div id="perf-axis" class="axis"></div>
+  </section>
+
+  <section class="panel">
+    <h2>套餐与账户</h2>
+    <div id="account" class="grid cards"><div class="card empty">加载中…</div></div>
+  </section>
+
+  <div id="errors" class="errors"></div>
+</div>
+
+<script src="{{STATIC}}/app.js"></script>
+</body>
+</html>
