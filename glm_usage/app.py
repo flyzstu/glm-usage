@@ -18,6 +18,7 @@ from .config import Settings, TokenStore
 from .logging_filters import install_secret_filter
 from .metrics import Metrics
 from .timerange import BadRequest
+from .zcode import ZCodeCredentials, ZCodeService
 
 STATIC_DIR = Path(__file__).parent / "static"
 APP_NAME = "glm_usage"
@@ -53,13 +54,18 @@ def create_app(
     app.config.KEEP_ALIVE = True
     app.config.KEEP_ALIVE_TIMEOUT = 65
     app.config.REQUEST_TIMEOUT = max(int(settings.request_timeout) + 5, 30)
-    app.config.RESPONSE_TIMEOUT = max(int(settings.request_timeout) + 5, 30)
+    app.config.RESPONSE_TIMEOUT = 600
     app.config.GRACEFUL_SHUTDOWN_TIMEOUT = 5
 
     metrics = Metrics()
     app.ctx.settings = settings
     app.ctx.metrics = metrics
     app.ctx.tokens = TokenStore.from_settings(settings)
+    app.ctx.proxy_transport = transport
+    if settings.zcode_token_file:
+        app.ctx.zcode = ZCodeService(token_file=settings.zcode_token_file, transport=transport)
+    else:
+        app.ctx.zcode = ZCodeService(credentials=ZCodeCredentials(), transport=transport)
     app.ctx.client = BigModelClient(settings, metrics=metrics, transport=transport)
     app.ctx.caches = {
         "quota": TTLCache(settings.quota_ttl, stale_ttl=settings.stale_ttl, max_entries=settings.cache_max_entries),
@@ -165,18 +171,24 @@ def create_app(
         """
         tokens: TokenStore = request.app.ctx.tokens
         metrics: Metrics = request.app.ctx.metrics
+        zcode_svc = getattr(request.app.ctx, "zcode", None)
+        zcode_info = zcode_svc.credentials.masked_summary() if zcode_svc else {}
+        token_source = "zcode_token_file" if (zcode_svc and zcode_svc.credentials.api_key) else tokens.source
+
         try:
             resolve_token(request)
             configured = True
         except BigModelError:
             configured = False
+
         auth = metrics.auth_state()
         return json_response(
             {
                 "status": "ok" if configured and not auth["rejected"] else "degraded",
                 "version": settings.version,
                 "uptimeSeconds": round(metrics.snapshot()["uptimeSeconds"], 3),
-                "token": {"configured": configured, "source": tokens.source},
+                "token": {"configured": configured, "source": token_source},
+                "zcode": zcode_info,
                 "upstreamAuth": auth,
                 "upstream": settings.base_url,
                 "refreshSeconds": settings.dashboard_refresh_seconds,
@@ -184,6 +196,7 @@ def create_app(
         )
 
     app.blueprint(api.bp)
+    app.blueprint(api.proxy_bp)
 
     # 面板故意不挂在根路径：/ 只做跳转，这样反代或中间件可以按
     # /dashboard 这个前缀单独加授权，而不会连带影响 API。

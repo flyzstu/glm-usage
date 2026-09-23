@@ -56,6 +56,7 @@ class Settings:
     base_url: str = "https://bigmodel.cn"
     token: str | None = None
     token_file: str | None = None
+    zcode_token_file: str | None = None
     api_key: str | None = None
 
     host: str = "0.0.0.0"
@@ -101,6 +102,8 @@ class Settings:
             base_url=(_str(f"{prefix}BASE_URL") or _str("BIGMODEL_BASE_URL") or "https://bigmodel.cn").rstrip("/"),
             token=_str("BIGMODEL_TOKEN"),
             token_file=_str("BIGMODEL_TOKEN_FILE"),
+            zcode_token_file=_str(f"{prefix}ZCODE_TOKEN_FILE")
+            or _str("ZCODE_TOKEN_FILE", str(Path("~/.zcode_coding_plan_token.json").expanduser())),
             api_key=_str(f"{prefix}API_KEY"),
             host=_str(f"{prefix}HOST", "0.0.0.0") or "0.0.0.0",
             port=_int(f"{prefix}PORT", 8000),

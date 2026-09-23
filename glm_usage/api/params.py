@@ -19,11 +19,14 @@ def resolve_token(request: Request) -> str:
         token = header[7:].strip() if header[:7].lower() == "bearer " else header.strip()
         if token:
             return token
+    zcode_svc = getattr(request.app.ctx, "zcode", None)
+    if zcode_svc and zcode_svc.credentials.api_key:
+        return zcode_svc.credentials.api_key
     token = tokens(request).get()
     if not token:
         raise MissingTokenError(
             "未配置 bigmodel token：请设置 BIGMODEL_TOKEN / BIGMODEL_TOKEN_FILE，"
-            "或在请求中带上 Authorization 请求头"
+            "或在请求中带上 Authorization 请求头，或在看板完成凭据配置"
         )
     return token
 

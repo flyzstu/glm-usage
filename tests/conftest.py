@@ -157,6 +157,7 @@ class FakeUpstream:
         self.requests: list[httpx.Request] = []
         self.fail_paths: set[str] = set()
         self.auth_error_paths: set[str] = set()
+        self.custom_responses: dict[str, httpx.Response] = {}
         self.delay = 0.0
         self.inflight = 0
         self.max_inflight = 0
@@ -176,6 +177,8 @@ class FakeUpstream:
             if self.delay:
                 await asyncio.sleep(self.delay)
             path = request.url.path
+            if path in self.custom_responses:
+                return self.custom_responses[path]
             if path in self.auth_error_paths:
                 return httpx.Response(200, json=AUTH_ERROR_PAYLOAD)
             if path in self.fail_paths:

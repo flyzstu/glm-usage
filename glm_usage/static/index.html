@@ -1,54 +1,394 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GLM 用量看板</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234c8dff'/%3E%3Ctext x='16' y='23' font-size='19' font-family='sans-serif' font-weight='bold' text-anchor='middle' fill='white'%3EG%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="{{STATIC}}/style.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GLM 用量看板 · Transparent Proxy & Quota Manager</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2310b981'/%3E%3Cpath d='M16 6L24 14H18V24H14V14H8L16 6Z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="{{STATIC}}/style.css">
 </head>
 <body>
-<div class="wrap">
-  <header>
-    <h1>GLM 用量看板</h1>
-    <span class="badge" id="level">--</span>
-    <span class="spacer"></span>
-    <span class="muted" id="updated">加载中…</span>
-    <button id="refresh">刷新</button>
+<div class="app-layout">
+  <!-- 顶部导航栏 -->
+  <header class="navbar">
+    <div class="brand">
+      <div class="logo-box">
+        <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+        </svg>
+      </div>
+      <div>
+        <div class="brand-title">GLM Proxy & Quota</div>
+        <div class="brand-sub">GLM 用量看板 · ZCode 1:1 Transparent Gateway</div>
+      </div>
+    </div>
+
+    <div class="nav-status-group">
+      <div class="status-pill status-ready" id="proxy-status-pill">
+        <span class="status-dot"></span>
+        <span id="proxy-status-text">代理就绪 (Port: 8000)</span>
+      </div>
+      <div class="badge badge-level" id="plan-level">--</div>
+    </div>
+
+    <div class="nav-actions">
+      <span class="updated-label" id="updated">加载中…</span>
+      <button class="btn btn-secondary" id="refresh" title="强制刷新最新数据">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+        </svg>
+        <span>刷新</span>
+      </button>
+    </div>
   </header>
 
+  <!-- 告警与状态横幅 -->
   <div id="banner" class="banner" hidden></div>
-  <div id="quota" class="grid cards"></div>
-  <div id="stats" class="grid stats"></div>
 
-  <section class="panel">
-    <h2>每日积分消耗</h2>
-    <div id="chart" class="chart"></div>
-    <div id="axis" class="axis"></div>
-  </section>
+  <!-- 选项卡导航 -->
+  <nav class="tabs-nav" role="tablist">
+    <button class="tab-btn active" data-tab="tab-quota" role="tab" aria-selected="true">
+      <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+      </svg>
+      <span>配额与重置卡</span>
+    </button>
+    <button class="tab-btn" data-tab="tab-proxy" role="tab" aria-selected="false">
+      <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"></circle>
+        <line x1="2" y1="12" x2="22" y2="12"></line>
+        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+      </svg>
+      <span>透明代理服务端</span>
+    </button>
+    <button class="tab-btn" data-tab="tab-usage" role="tab" aria-selected="false">
+      <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <line x1="18" y1="20" x2="18" y2="10"></line>
+        <line x1="12" y1="20" x2="12" y2="4"></line>
+        <line x1="6" y1="20" x2="6" y2="14"></line>
+      </svg>
+      <span>用量与模型分析</span>
+    </button>
+    <button class="tab-btn" data-tab="tab-credentials" role="tab" aria-selected="false">
+      <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path>
+      </svg>
+      <span>凭据与设置</span>
+    </button>
+  </nav>
 
-  <section class="panel">
-    <h2>模型用量</h2>
-    <table>
-      <thead><tr><th>模型</th><th>Tokens</th><th>积分</th><th>占比</th></tr></thead>
-      <tbody id="models"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>
-    </table>
-  </section>
+  <!-- TAB 1: 配额与重置卡 -->
+  <main class="tab-content active" id="tab-quota">
+    <!-- 实时配额仪表盘 -->
+    <section class="section">
+      <div class="section-header">
+        <h2 class="section-title">实时额度窗口</h2>
+        <span class="section-desc">BigModel 5小时滑动窗口限额与每周总限额实时监控</span>
+      </div>
+      <div id="quota-cards" class="grid cards-grid">
+        <div class="card empty">正在获取实时配额…</div>
+      </div>
+    </section>
 
-  <section class="panel">
-    <h2>系统健康度（Decode 速度 / 成功率）</h2>
-    <div id="perf-stats" class="grid stats"></div>
-    <div id="perf-chart" class="chart"></div>
-    <div id="perf-axis" class="axis"></div>
-  </section>
+    <!-- 额度重置卡管理 -->
+    <section class="section">
+      <div class="section-header">
+        <h2 class="section-title">额度重置卡管理 (ZCode Coding Plan Reset Cards)</h2>
+        <span class="section-desc">1:1 对齐 ZCode 官方重置卡查询与即时核销功能</span>
+      </div>
+      <div id="reset-cards-grid" class="grid cards-grid">
+        <div class="card empty">正在检测重置卡状态…</div>
+      </div>
+    </section>
 
-  <section class="panel">
-    <h2>套餐与账户</h2>
-    <div id="account" class="grid cards"><div class="card empty">加载中…</div></div>
-  </section>
+    <!-- 核销记录与历史 -->
+    <section class="section panel">
+      <div class="section-header">
+        <h2 class="section-title">重置卡最近使用记录</h2>
+      </div>
+      <div id="reset-history" class="reset-history-box">
+        <div class="empty">暂无历史核销记录</div>
+      </div>
+    </section>
+  </main>
 
+  <!-- TAB 2: 透明代理服务端 -->
+  <main class="tab-content" id="tab-proxy">
+    <section class="section">
+      <div class="proxy-hero card">
+        <div class="hero-header">
+          <div>
+            <div class="hero-title">透明代理服务已就绪</div>
+            <div class="hero-desc">标准 Anthropic 消息协议接入，1:1 注入 ZCode 官方 Ultra 网关路由与设备指纹标头</div>
+          </div>
+          <div class="hero-badge">直通模式 · 零内部干预</div>
+        </div>
+
+        <div class="endpoint-box">
+          <span class="endpoint-label">本地代理端点</span>
+          <code class="endpoint-code" id="proxy-endpoint-url">http://127.0.0.1:8000/v1/messages</code>
+          <button class="btn btn-sm btn-primary" id="copy-endpoint-btn">
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>复制端点</span>
+          </button>
+        </div>
+
+        <div class="features-grid">
+          <div class="feature-item">
+            <svg class="feature-icon text-good" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+            <div>
+              <div class="feature-name">1:1 Ultra 官方路由</div>
+              <div class="feature-sub">动态映射至 zcode.z.ai 官方 Coding Plan 网关</div>
+            </div>
+          </div>
+          <div class="feature-item">
+            <svg class="feature-icon text-good" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+            <div>
+              <div class="feature-name">1:1 设备与观测标头</div>
+              <div class="feature-sub">完整注入 OS/架构、X-Title、X-ZCode-Agent 指纹</div>
+            </div>
+          </div>
+          <div class="feature-item">
+            <svg class="feature-icon text-good" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+            <div>
+              <div class="feature-name">错误原样直通</div>
+              <div class="feature-sub">上游 4xx/5xx/限流等错误原样抛向下游，不做内部拦截</div>
+            </div>
+          </div>
+          <div class="feature-item">
+            <svg class="feature-icon text-good" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+            <div>
+              <div class="feature-name">零延迟流式转发</div>
+              <div class="feature-sub">实时无缓冲 SSE 分块转发，中文字符零截断</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 实时调用指标 -->
+    <section class="section">
+      <div class="section-header">
+        <h2 class="section-title">代理调用统计</h2>
+      </div>
+      <div id="proxy-stats-grid" class="grid stats-grid">
+        <div class="stat-card">
+          <div class="stat-k">总请求数</div>
+          <div class="stat-v" id="stat-total-reqs">0</div>
+          <div class="stat-sub">累计代理转发</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-k">流式请求 (SSE)</div>
+          <div class="stat-v" id="stat-stream-reqs">0</div>
+          <div class="stat-sub">实时流式调用</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-k">调用成功率</div>
+          <div class="stat-v text-good" id="stat-success-rate">100%</div>
+          <div class="stat-sub" id="stat-success-count">2xx 成功: 0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-k">异常透传数</div>
+          <div class="stat-v text-warn" id="stat-error-count">0</div>
+          <div class="stat-sub">上游 4xx/5xx 原样透传</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 快捷配置指南 -->
+    <section class="section panel">
+      <div class="section-header">
+        <h2 class="section-title">客户端快捷配置指南 (Quick Setup)</h2>
+        <span class="section-desc">无缝接入 Claude Code CLI、Cursor、OpenCode、Aider 等开发工具</span>
+      </div>
+
+      <div class="snippets-container">
+        <!-- Claude Code -->
+        <div class="snippet-card">
+          <div class="snippet-head">
+            <span class="snippet-title">Claude Code CLI</span>
+            <button class="btn btn-xs btn-secondary" onclick="copySnippet('claude-code-snippet')">复制命令</button>
+          </div>
+          <pre class="snippet-pre"><code id="claude-code-snippet">export ANTHROPIC_BASE_URL="http://127.0.0.1:8000"
+export ANTHROPIC_API_KEY="dummy"
+claude</code></pre>
+        </div>
+
+        <!-- Cursor / OpenCode -->
+        <div class="snippet-card">
+          <div class="snippet-head">
+            <span class="snippet-title">Cursor / OpenCode / Cline / Roo Code</span>
+            <button class="btn btn-xs btn-secondary" onclick="copySnippet('opencode-snippet')">复制配置</button>
+          </div>
+          <pre class="snippet-pre"><code id="opencode-snippet">Base URL: http://127.0.0.1:8000
+API Key : dummy (或留空)
+Model   : GLM-5.3 (或 claude-3-7-sonnet，服务端自动映射)</code></pre>
+        </div>
+
+        <!-- Curl -->
+        <div class="snippet-card">
+          <div class="snippet-head">
+            <span class="snippet-title">Curl 终端测试</span>
+            <button class="btn btn-xs btn-secondary" onclick="copySnippet('curl-snippet')">复制命令</button>
+          </div>
+          <pre class="snippet-pre"><code id="curl-snippet">curl -X POST "http://127.0.0.1:8000/v1/messages" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "GLM-5.3", "messages": [{"role": "user", "content": "你好"}], "max_tokens": 50}'</code></pre>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- TAB 3: 用量与模型分析 -->
+  <main class="tab-content" id="tab-usage">
+    <div id="stats" class="grid stats-grid"></div>
+
+    <section class="section panel">
+      <div class="section-header">
+        <h2 class="section-title">每日积分消耗趋势 (近 7 日)</h2>
+      </div>
+      <div id="chart" class="chart"></div>
+      <div id="axis" class="axis"></div>
+    </section>
+
+    <section class="section panel">
+      <div class="section-header">
+        <h2 class="section-title">模型用量消耗统计</h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>模型名称</th><th>Tokens</th><th>消耗积分</th><th>占比</th></tr>
+          </thead>
+          <tbody id="models"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section panel">
+      <div class="section-header">
+        <h2 class="section-title">系统健康度（Decode 速度 / 成功率）</h2>
+      </div>
+      <div id="perf-stats" class="grid stats-grid"></div>
+      <div id="perf-chart" class="chart"></div>
+      <div id="perf-axis" class="axis"></div>
+    </section>
+
+    <section class="section panel">
+      <div class="section-header">
+        <h2 class="section-title">套餐订阅与账户状态</h2>
+      </div>
+      <div id="account" class="grid cards-grid"><div class="card empty">加载中…</div></div>
+    </section>
+  </main>
+
+  <!-- TAB 4: 凭据与设置 -->
+  <main class="tab-content" id="tab-credentials">
+    <section class="section">
+      <div class="section-header">
+        <h2 class="section-title">当前凭据与授权状态</h2>
+        <span class="section-desc">配置 BigModel API Key 以及 ZCode 官方平台授权令牌</span>
+      </div>
+      <div id="credentials-card" class="card">
+        <div class="card-loading">正在读取凭据状态…</div>
+      </div>
+    </section>
+
+    <!-- 一键官方 OAuth 授权 -->
+    <section class="section panel">
+      <div class="section-header">
+        <h2 class="section-title">ZCode 官方设备授权 (OAuth Login)</h2>
+        <span class="section-desc">一键唤起官方授权流程，完成后自动同步换取 Coding Plan 密钥与重置卡凭据</span>
+      </div>
+      <div class="oauth-box">
+        <div class="oauth-desc">
+          点击下方按钮后，系统将自动向 ZCode 申请设备授权流。您只需在弹出的网页中完成登录，服务端即可自动换取 <code>zcode-api-key</code> 与重置卡核销凭据，并保存至本地。
+        </div>
+        <div class="oauth-actions">
+          <button class="btn btn-primary" id="btn-start-oauth">
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3"/>
+            </svg>
+            <span>启动官方网页授权</span>
+          </button>
+          <button class="btn btn-secondary" id="btn-manual-creds">手动填写凭据</button>
+        </div>
+        <div id="oauth-polling-status" class="oauth-status" hidden></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 错误输出区域 -->
   <div id="errors" class="errors"></div>
 </div>
+
+<!-- 核销重置卡确认弹窗 -->
+<div id="modal-confirm-reset" class="modal-backdrop" hidden>
+  <div class="modal-card">
+    <div class="modal-header">
+      <div class="modal-title" id="modal-reset-title">确认核销额度重置卡？</div>
+      <button class="btn-close" id="modal-reset-close">&times;</button>
+    </div>
+    <div class="modal-body" id="modal-reset-body">
+      核销后当前周期已消耗额度将立即归零并恢复上限。此操作不可逆，请确认是否立即核销。
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="modal-reset-cancel">取消</button>
+      <button class="btn btn-danger" id="modal-reset-confirm">确认核销</button>
+    </div>
+  </div>
+</div>
+
+<!-- 手动填写凭据弹窗 -->
+<div id="modal-manual-creds" class="modal-backdrop" hidden>
+  <div class="modal-card">
+    <div class="modal-header">
+      <div class="modal-title">配置 ZCode / BigModel 凭据</div>
+      <button class="btn-close" id="modal-creds-close">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">服务提供商 (Provider)</label>
+        <select id="input-provider" class="form-input">
+          <option value="bigmodel">BigModel (智谱国内版)</option>
+          <option value="zai">Z.ai (海外版)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">模型 API Key (id.secret 或 token)</label>
+        <input type="password" id="input-api-key" class="form-input" placeholder="c748...4c.a3... 或 JWT">
+        <div class="form-hint">用于透明代理以及用量接口调用</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">ZCode 平台 JWT (zcode_jwt_token，可选)</label>
+        <input type="password" id="input-zcode-jwt" class="form-input" placeholder="eyJhbGci...">
+        <div class="form-hint">用于额度重置卡状态查询与核销</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">OAuth 访问令牌 (oauth_access_token，可选)</label>
+        <input type="password" id="input-oauth-token" class="form-input" placeholder="OAuth Access Token">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="modal-creds-cancel">取消</button>
+      <button class="btn btn-primary" id="modal-creds-save">保存并更新</button>
+    </div>
+  </div>
+</div>
+
+<!-- 吐司通知容器 -->
+<div id="toast-container" class="toast-container"></div>
 
 <script src="{{STATIC}}/app.js"></script>
 </body>

@@ -4,6 +4,8 @@ const API_KEY_STORAGE = "glm-usage-api-key";
 let refreshSeconds = 30;
 let nextResets = [];
 let inflight = false;
+let pendingResetType = null;
+let oauthPollingTimer = null;
 
 // 支持用 /dashboard?key=xxx 打开一次：把密钥存进 localStorage 后立刻从地址栏抹掉，
 // 后续请求只走 X-API-Key 请求头，密钥不再出现在 URL / 历史记录里。
@@ -46,7 +48,8 @@ const duration = (ms) => {
   if (h) return h + " 小时 " + (m % 60) + " 分";
   return m + " 分 " + (s % 60) + " 秒";
 };
-const barColor = (used) => used >= 90 ? "var(--bad)" : used >= 70 ? "var(--warn)" : "var(--accent)";
+const barColor = (used) => used >= 90 ? "var(--bad)" : used >= 70 ? "var(--warn)" : "var(--good)";
+
 const el = (tag, cls, text) => {
   const node = document.createElement(tag);
   if (cls) node.className = cls;
@@ -54,6 +57,64 @@ const el = (tag, cls, text) => {
   return node;
 };
 
+// ==================== 吐司通知系统 ====================
+function showToast(message, type = "info") {
+  const container = $("toast-container");
+  if (!container) return;
+  const toast = el("div", "toast");
+  if (type === "success") {
+    toast.style.borderColor = "rgba(16, 185, 129, 0.4)";
+    toast.style.background = "rgba(16, 185, 129, 0.12)";
+    toast.style.color = "#34d399";
+  } else if (type === "error") {
+    toast.style.borderColor = "rgba(239, 68, 68, 0.4)";
+    toast.style.background = "rgba(239, 68, 68, 0.12)";
+    toast.style.color = "#f87171";
+  } else if (type === "warn") {
+    toast.style.borderColor = "rgba(245, 158, 11, 0.4)";
+    toast.style.background = "rgba(245, 158, 11, 0.12)";
+    toast.style.color = "#fbbf24";
+  }
+  toast.textContent = message;
+  container.append(toast);
+  setTimeout(() => {
+    toast.style.opacity = "0";
+    toast.style.transition = "opacity 0.25s ease";
+    setTimeout(() => toast.remove(), 250);
+  }, 3200);
+}
+
+// ==================== 代码片段复制 ====================
+window.copySnippet = function(id) {
+  const node = $(id);
+  if (!node) return;
+  const text = node.textContent;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => {
+      showToast("已成功复制到剪贴板！", "success");
+    }).catch(() => fallbackCopy(text));
+  } else {
+    fallbackCopy(text);
+  }
+};
+
+function fallbackCopy(text) {
+  const input = document.createElement("textarea");
+  input.value = text;
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.appendChild(input);
+  input.select();
+  try {
+    document.execCommand("copy");
+    showToast("已成功复制到剪贴板！", "success");
+  } catch (_) {
+    showToast("复制失败，请手动选取复制", "error");
+  }
+  document.body.removeChild(input);
+}
+
+// ==================== 网络请求层 ====================
 async function getJSON(url) {
   const headers = { accept: "application/json" };
   const key = apiKey();
@@ -64,21 +125,73 @@ async function getJSON(url) {
   if (!res.ok) {
     const msg = body && body.error ? (body.error.message || body.error.type) : res.status + " " + res.statusText;
     const type = body && body.error ? body.error.type : "";
-    // 认证失败两种：没带 key（403 forbidden）、带了但不对（401 unauthorized）。
-    // 服务端只回一句泛化的"未授权"（不点名 header / ?key=，免得被扫描器当路标），
-    // 所以给人看的提示放这儿。注意上游 token 缺失/过期也是 401，但类型不同，要原样透出。
     if (type === "unauthorized" || type === "forbidden") {
-      throw new Error("未授权：请用 " + window.location.pathname + "?key=你的密钥 打开一次本页（换过密钥也要重新打开一次）");
+      throw new Error("未授权：请用 " + window.location.pathname + "?key=你的密钥 打开一次本页");
     }
     throw new Error(msg);
   }
   return body;
 }
 
+async function postJSON(url, data) {
+  const headers = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+  };
+  const key = apiKey();
+  if (key) headers["X-API-Key"] = key;
+  const res = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(data || {}),
+  });
+  let body = null;
+  try { body = await res.json(); } catch (_) { /* non-JSON error page */ }
+  if (!res.ok) {
+    const msg = body && (body.error?.message || body.error?.type || body.message) || (res.status + " " + res.statusText);
+    throw new Error(msg);
+  }
+  return body;
+}
+
+// ==================== TAB 选项卡切换 ====================
+function setupTabs() {
+  const buttons = document.querySelectorAll(".tab-btn");
+  const contents = document.querySelectorAll(".tab-content");
+
+  buttons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tabId = btn.getAttribute("data-tab");
+      buttons.forEach((b) => {
+        b.classList.remove("active");
+        b.setAttribute("aria-selected", "false");
+      });
+      contents.forEach((c) => c.classList.remove("active"));
+
+      btn.classList.add("active");
+      btn.setAttribute("aria-selected", "true");
+      const target = $(tabId);
+      if (target) target.classList.add("active");
+
+      // 切换即时轻量拉取对应 Tab 数据
+      if (tabId === "tab-proxy") loadProxyStatus();
+      else if (tabId === "tab-credentials") loadCredentials();
+      else if (tabId === "tab-quota") loadResetStatus();
+    });
+  });
+}
+
+// ==================== TAB 1: 配额与重置卡 ====================
 function renderQuota(quota) {
-  const host = $("quota");
+  const host = $("quota-cards");
+  if (!host) return;
   host.textContent = "";
-  $("level").textContent = quota && quota.level ? String(quota.level) : "--";
+
+  const levelNode = $("plan-level");
+  if (levelNode) {
+    levelNode.textContent = quota && quota.level ? String(quota.level) : "--";
+  }
+
   const limits = (quota && quota.limits) || [];
   nextResets = [];
   if (!limits.length) {
@@ -89,33 +202,302 @@ function renderQuota(quota) {
     const used = Number(lim.currentValue) || 0;
     const total = Number(lim.usage) || 0;
     const percent = total > 0 ? Math.min(used / total * 100, 100) : Number(lim.percentage) || 0;
-    const card = el("div", "card");
-    const head = el("div", "card-head");
-    head.append(el("span", "t", RESET_LABELS[lim.unit] || ("额度 " + lim.unit + "×" + lim.number)));
-    head.append(el("span", "r", percent.toFixed(1) + "%"));
+
+    const card = el("div", "card quota-card");
+
+    const head = el("div", "quota-header");
+    head.append(el("span", "quota-title", RESET_LABELS[lim.unit] || ("额度 " + lim.unit + "×" + lim.number)));
+    const pctSpan = el("span", "quota-percent", percent.toFixed(1) + "%");
+    pctSpan.style.color = percent >= 90 ? "var(--bad)" : percent >= 70 ? "var(--warn)" : "var(--good)";
+    head.append(pctSpan);
     card.append(head);
-    const line = el("div", "line");
+
+    const line = el("div", "quota-numbers");
     line.append(el("b", null, num(used, 2)), document.createTextNode(" / " + num(total, 2) + " 积分"));
     card.append(line);
-    const bar = el("div", "bar");
-    const fill = el("i");
+
+    const bar = el("div", "progress-bar");
+    const fill = el("div", "progress-fill");
     fill.style.width = Math.max(percent, 0.5) + "%";
     fill.style.background = barColor(percent);
     bar.append(fill);
     card.append(bar);
-    const foot = el("div", "card-foot");
-    foot.append(el("span", null, "剩余 " + num(lim.remaining, 2)));
+
+    const foot = el("div", "quota-footer");
+    foot.append(el("span", null, "剩余 " + num(lim.remaining, 2) + " 积分"));
     const reset = el("span", null, "--");
     if (lim.nextResetTime) {
       nextResets.push([reset, Number(lim.nextResetTime)]);
     }
     foot.append(reset);
     card.append(foot);
+
     host.append(card);
   }
   tickResets();
 }
 
+function tickResets() {
+  const now = Date.now();
+  for (const [node, ts] of nextResets) {
+    const left = ts - now;
+    if (left <= 0) { node.textContent = "即将重置"; continue; }
+    const s = Math.floor(left / 1000);
+    const days = Math.floor(s / 86400);
+    const hours = Math.floor((s % 86400) / 3600);
+    const minutes = Math.floor((s % 3600) / 60);
+    let text;
+    if (days > 0) text = days + " 天 " + hours + " 小时";
+    else if (hours > 0) text = hours + " 小时 " + minutes + " 分";
+    else text = minutes + " 分 " + (s % 60) + " 秒";
+    node.textContent = text + "后重置";
+  }
+}
+
+async function loadResetStatus() {
+  const host = $("reset-cards-grid");
+  try {
+    const res = await getJSON("/api/v1/reset/status");
+    renderResetCards(res.data);
+  } catch (err) {
+    if (host) {
+      host.textContent = "";
+      host.append(el("div", "card empty", "获取重置卡状态失败: " + err.message));
+    }
+  }
+}
+
+function renderResetCards(data) {
+  const host = $("reset-cards-grid");
+  if (!host) return;
+  host.textContent = "";
+
+  if (!data || data.available === false) {
+    const card = el("div", "card");
+    const title = el("div", "reset-body-highlight", "重置卡未就绪");
+    const desc = el("div", "reset-body", (data && data.reason) || "缺少 ZCode 平台凭据或接口未开通。请先在「凭据与设置」中配置凭据，或通过官方网页授权登录。");
+    const actions = el("div", "modal-footer");
+    actions.style.padding = "10px 0 0 0";
+    actions.style.background = "none";
+    actions.style.border = "none";
+    actions.style.justifyContent = "flex-start";
+    const btn = el("button", "btn btn-sm btn-primary", "前往凭据设置");
+    btn.onclick = () => {
+      const credTab = document.querySelector('.tab-btn[data-tab="tab-credentials"]');
+      if (credTab) credTab.click();
+    };
+    actions.append(btn);
+    card.append(title, desc, actions);
+    host.append(card);
+    return;
+  }
+
+  const fiveHourList = data.five_hour_resets || [];
+  const weekList = data.week_resets || [];
+
+  // 1. 5小时重置卡
+  const card5 = createResetCardDOM({
+    type: "FIVE_HOUR",
+    title: "5小时额度重置卡",
+    badge: "FIVE_HOUR",
+    count: fiveHourList.length,
+    desc: "使用后立即清零当前 5 小时滑动窗口内的已用积分，恢复 100% 额度上限。",
+    items: fiveHourList,
+  });
+  host.append(card5);
+
+  // 2. 周度重置卡
+  const cardWeek = createResetCardDOM({
+    type: "WEEK",
+    title: "周度额度重置卡",
+    badge: "WEEK",
+    count: weekList.length,
+    desc: "使用后立即清零本周累计已用积分，恢复每周总额度上限。",
+    items: weekList,
+  });
+  host.append(cardWeek);
+
+  // 历史核销记录
+  renderResetHistory(data);
+}
+
+function createResetCardDOM({ type, title, badge, count, desc, items }) {
+  const card = el("div", "card reset-card");
+
+  const head = el("div", "reset-card-head");
+  head.append(el("span", "quota-title", title));
+  head.append(el("span", "reset-badge", badge));
+  card.append(head);
+
+  const body = el("div", "reset-body");
+  const countDiv = el("div", "reset-body-highlight", count + " 张可用");
+  if (count === 0) countDiv.style.color = "var(--dim)";
+  body.append(countDiv);
+  body.append(el("div", null, desc));
+
+  if (items && items.length > 0) {
+    const expireInfo = items[0].expires_at || items[0].expire_time || items[0].valid_until;
+    if (expireInfo) {
+      body.append(el("div", "form-hint", "最近一张有效期至: " + expireInfo));
+    }
+  }
+  card.append(body);
+
+  const foot = el("div", "reset-footer");
+  const statusSpan = el("span", null, count > 0 ? "即时生效 · 无冷却" : "暂无可核销卡券");
+  statusSpan.className = count > 0 ? "text-good" : "text-dim";
+  foot.append(statusSpan);
+
+  const btn = el("button", "btn btn-sm " + (count > 0 ? "btn-good" : "btn-secondary"), "立即核销");
+  if (count === 0) {
+    btn.disabled = true;
+  } else {
+    btn.onclick = () => openResetConfirmModal(type, title);
+  }
+  foot.append(btn);
+  card.append(foot);
+
+  return card;
+}
+
+function renderResetHistory(data) {
+  const host = $("reset-history");
+  if (!host) return;
+  host.textContent = "";
+
+  const hist5 = data.latest_five_hour_history;
+  const histWeek = data.latest_week_history;
+
+  if (!hist5 && !histWeek) {
+    host.append(el("div", "empty", "暂无历史核销记录"));
+    return;
+  }
+
+  if (hist5) {
+    const item = el("div", "history-item");
+    const left = el("div");
+    left.append(el("b", null, "5小时额度重置卡"), el("div", "form-hint", hist5.created_at || hist5.use_time || "已核销"));
+    const right = el("span", "badge", "已清零当前窗口");
+    item.append(left, right);
+    host.append(item);
+  }
+
+  if (histWeek) {
+    const item = el("div", "history-item");
+    const left = el("div");
+    left.append(el("b", null, "周度额度重置卡"), el("div", "form-hint", histWeek.created_at || histWeek.use_time || "已核销"));
+    const right = el("span", "badge", "已清零本周累计");
+    item.append(left, right);
+    host.append(item);
+  }
+}
+
+// ==================== 核销确认弹窗 ====================
+function openResetConfirmModal(resetType, resetTitle) {
+  pendingResetType = resetType;
+  const modal = $("modal-confirm-reset");
+  const title = $("modal-reset-title");
+  const body = $("modal-reset-body");
+
+  if (title) title.textContent = `确认核销 ${resetTitle}？`;
+  if (body) {
+    body.textContent = resetType === "FIVE_HOUR"
+      ? "核销后当前 5 小时滑动窗口内已消耗的额度将立即归零并恢复上限。此操作不可逆，请确认是否立即核销。"
+      : "核销后本周内已消耗的额度将立即归零并恢复上限。此操作不可逆，请确认是否立即核销。";
+  }
+  if (modal) modal.hidden = false;
+}
+
+function setupResetConfirmModal() {
+  const modal = $("modal-confirm-reset");
+  const closeBtn = $("modal-reset-close");
+  const cancelBtn = $("modal-reset-cancel");
+  const confirmBtn = $("modal-reset-confirm");
+
+  const hide = () => {
+    if (modal) modal.hidden = true;
+    pendingResetType = null;
+  };
+
+  if (closeBtn) closeBtn.onclick = hide;
+  if (cancelBtn) cancelBtn.onclick = hide;
+
+  if (confirmBtn) {
+    confirmBtn.onclick = async () => {
+      if (!pendingResetType) return;
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = "核销中…";
+      try {
+        const res = await postJSON("/api/v1/reset/use", { reset_type: pendingResetType });
+        showToast(res.message || "核销成功！配额已恢复", "success");
+        hide();
+        load(true);
+        loadResetStatus();
+      } catch (err) {
+        showToast("核销失败: " + err.message, "error");
+      } finally {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = "确认核销";
+      }
+    };
+  }
+}
+
+// ==================== TAB 2: 透明代理服务端 ====================
+async function loadProxyStatus() {
+  try {
+    const res = await getJSON("/api/v1/proxy/status");
+    const data = res.data || {};
+
+    const urlCode = $("proxy-endpoint-url");
+    if (urlCode && data.localEndpoints?.v1Messages) {
+      urlCode.textContent = data.localEndpoints.v1Messages;
+    }
+
+    const pill = $("proxy-status-pill");
+    const pillText = $("proxy-status-text");
+    if (pill && pillText) {
+      if (data.status === "ready") {
+        pill.className = "status-pill status-ready";
+        pillText.textContent = `代理就绪 (${data.providerName || "BigModel"})`;
+      } else {
+        pill.className = "status-pill status-warn";
+        pillText.textContent = "未配置 API Key";
+      }
+    }
+
+    // 调用统计指标
+    const stats = data.stats || {};
+    const total = stats.total_requests || 0;
+    const stream = stats.streaming_requests || 0;
+    const success = stats.success_requests || 0;
+    const errors = stats.error_requests || 0;
+
+    const rate = total > 0 ? ((success / total) * 100).toFixed(1) + "%" : "100%";
+
+    if ($("stat-total-reqs")) $("stat-total-reqs").textContent = num(total);
+    if ($("stat-stream-reqs")) $("stat-stream-reqs").textContent = num(stream);
+    if ($("stat-success-rate")) $("stat-success-rate").textContent = rate;
+    if ($("stat-success-count")) $("stat-success-count").textContent = `2xx 成功: ${num(success)}`;
+    if ($("stat-error-count")) $("stat-error-count").textContent = num(errors);
+
+    // 快捷代码块动态更新
+    if (data.snippets?.claude_code?.env && $("claude-code-snippet")) {
+      $("claude-code-snippet").textContent = data.snippets.claude_code.env;
+    }
+    if (data.snippets?.curl?.command && $("curl-snippet")) {
+      $("curl-snippet").textContent = data.snippets.curl.command;
+    }
+    if (data.localEndpoints?.v1Messages && $("opencode-snippet")) {
+      const origin = data.localEndpoints.v1Messages.replace("/v1/messages", "");
+      $("opencode-snippet").textContent = `Base URL: ${origin}\nAPI Key : dummy (或留空)\nModel   : GLM-5.3 (或 claude-3-7-sonnet，服务端自动映射)`;
+    }
+  } catch (err) {
+    console.error("加载代理状态失败:", err);
+  }
+}
+
+// ==================== TAB 3: 用量与模型分析 ====================
 function statsFrom(data) {
   const usage = (data.usage && data.usage.summary) || {};
   const act = (data.activity && data.activity.summary) || {};
@@ -145,16 +527,17 @@ function statsFrom(data) {
 
 function renderStats(data) {
   const host = $("stats");
+  if (!host) return;
   host.textContent = "";
   const items = statsFrom(data);
   if (!items.length) {
-    host.append(el("div", "stat", "暂无统计数据"));
+    host.append(el("div", "stat-card", "暂无统计数据"));
     return;
   }
   for (const item of items) {
-    const card = el("div", "stat");
-    card.append(el("div", "k", item.sub));
-    card.append(el("div", "v", item.value));
+    const card = el("div", "stat-card");
+    card.append(el("div", "stat-k", item.sub));
+    card.append(el("div", "stat-v", item.value));
     host.append(card);
   }
 }
@@ -185,6 +568,7 @@ function chartSeries(data) {
 
 function renderChart(data) {
   const host = $("chart"), axis = $("axis");
+  if (!host || !axis) return;
   host.textContent = ""; axis.textContent = "";
   const series = chartSeries(data);
   if (!series.length) {
@@ -205,6 +589,7 @@ function renderChart(data) {
 
 function renderModels(data) {
   const body = $("models");
+  if (!body) return;
   body.textContent = "";
   const list = (data.usage && data.usage.modelSummaryList) || [];
   if (!list.length) {
@@ -232,6 +617,7 @@ function renderPerformance(data) {
   const statHost = $("perf-stats");
   const chartHost = $("perf-chart");
   const axis = $("perf-axis");
+  if (!statHost || !chartHost || !axis) return;
   statHost.textContent = "";
   chartHost.textContent = "";
   axis.textContent = "";
@@ -256,9 +642,9 @@ function renderPerformance(data) {
   ];
   for (const [label, value, format] of summary) {
     if (isBlank(value)) continue;
-    const card = el("div", "stat");
-    card.append(el("div", "k", label));
-    card.append(el("div", "v", format(value)));
+    const card = el("div", "stat-card");
+    card.append(el("div", "stat-k", label));
+    card.append(el("div", "stat-v", format(value)));
     statHost.append(card);
   }
 
@@ -321,6 +707,7 @@ function firstRecord(value) {
 
 function renderAccount(body) {
   const host = $("account");
+  if (!host) return;
   host.textContent = "";
   const data = (body && body.data) || {};
   const errors = (body && body.meta && body.meta.errors) || {};
@@ -370,6 +757,7 @@ function renderAccount(body) {
 
 async function loadAccount(force) {
   const host = $("account");
+  if (!host) return;
   try {
     const body = await getJSON("/api/v1/account" + (force ? "?refresh=1" : ""));
     renderAccount(body);
@@ -379,25 +767,180 @@ async function loadAccount(force) {
   }
 }
 
-function tickResets() {
-  const now = Date.now();
-  for (const [node, ts] of nextResets) {
-    const left = ts - now;
-    if (left <= 0) { node.textContent = "即将重置"; continue; }
-    const s = Math.floor(left / 1000);
-    const days = Math.floor(s / 86400);
-    const hours = Math.floor((s % 86400) / 3600);
-    const minutes = Math.floor((s % 3600) / 60);
-    let text;
-    if (days > 0) text = days + " 天 " + hours + " 小时";
-    else if (hours > 0) text = hours + " 小时 " + minutes + " 分";
-    else text = minutes + " 分 " + (s % 60) + " 秒";
-    node.textContent = text + "后重置";
+// ==================== TAB 4: 凭据与设置 ====================
+async function loadCredentials() {
+  const host = $("credentials-card");
+  if (!host) return;
+  try {
+    const res = await getJSON("/api/v1/credentials");
+    const data = res.data || {};
+
+    host.textContent = "";
+
+    const rows = [
+      ["服务提供商 (Provider)", data.provider === "zai" ? "Z.ai (海外版)" : "BigModel (国内版)"],
+      ["API Key 状态", data.configured ? (data.apiKeyMasked || "已配置") : "未配置"],
+      ["重置卡核销能力", data.hasResetCapability ? "已具备 (已注入 OAuth/JWT)" : "未就绪 (缺少 OAuth 或 JWT 令牌)"],
+      ["凭据存储路径", data.tokenFile || "~/.zcode_coding_plan_token.json"],
+      ["凭据有效期", data.expiresAt || "随官方认证会话持续有效"],
+      ["最近更新时间", data.updatedAt || "--"],
+    ];
+
+    const cardWrap = el("div");
+    for (const [k, v] of rows) {
+      const row = el("div", "kv-row");
+      row.append(el("span", "k", k), el("span", "v", String(v)));
+      cardWrap.append(row);
+    }
+    host.append(cardWrap);
+
+    // 回填设置选择框
+    const provSelect = $("input-provider");
+    if (provSelect && data.provider) provSelect.value = data.provider;
+  } catch (err) {
+    host.textContent = "获取凭据失败：" + err.message;
   }
 }
 
+function setupManualCredsModal() {
+  const modal = $("modal-manual-creds");
+  const openBtn = $("btn-manual-creds");
+  const closeBtn = $("modal-creds-close");
+  const cancelBtn = $("modal-creds-cancel");
+  const saveBtn = $("modal-creds-save");
+
+  const hide = () => { if (modal) modal.hidden = true; };
+  const show = () => { if (modal) modal.hidden = false; };
+
+  if (openBtn) openBtn.onclick = show;
+  if (closeBtn) closeBtn.onclick = hide;
+  if (cancelBtn) cancelBtn.onclick = hide;
+
+  if (saveBtn) {
+    saveBtn.onclick = async () => {
+      const provider = $("input-provider")?.value;
+      const keyInput = $("input-api-key")?.value;
+      const zcodeJwt = $("input-zcode-jwt")?.value;
+      const oauthToken = $("input-oauth-token")?.value;
+
+      saveBtn.disabled = true;
+      saveBtn.textContent = "保存中…";
+      try {
+        const payload = {};
+        if (provider) payload.provider = provider;
+        if (keyInput) payload.api_key = keyInput;
+        if (zcodeJwt) payload.zcode_jwt_token = zcodeJwt;
+        if (oauthToken) payload.oauth_access_token = oauthToken;
+
+        await postJSON("/api/v1/credentials", payload);
+        showToast("凭据已成功保存！", "success");
+        hide();
+
+        if ($("input-api-key")) $("input-api-key").value = "";
+        if ($("input-zcode-jwt")) $("input-zcode-jwt").value = "";
+        if ($("input-oauth-token")) $("input-oauth-token").value = "";
+
+        load(true);
+        loadCredentials();
+        loadResetStatus();
+        loadProxyStatus();
+      } catch (err) {
+        showToast("保存凭据失败: " + err.message, "error");
+      } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = "保存并更新";
+      }
+    };
+  }
+}
+
+async function startOAuthFlow() {
+  const btn = $("btn-start-oauth");
+  const statusBox = $("oauth-polling-status");
+  if (btn) btn.disabled = true;
+  if (statusBox) {
+    statusBox.hidden = false;
+    statusBox.textContent = "正在向官方申请设备授权流程…";
+  }
+
+  try {
+    const res = await postJSON("/api/v1/oauth/init", {});
+    const data = res.data || {};
+    const flowId = data.flow_id;
+    const verifyUrl = data.verification_uri_complete || data.verification_uri;
+    const userCode = data.user_code;
+
+    statusBox.textContent = "";
+
+    const info = el("div");
+    info.style.marginBottom = "10px";
+    info.append(
+      document.createTextNode("请在弹出的官方页面中完成登录授权。若未自动弹出，请手动点击：")
+    );
+    const linkNode = el("a", null, verifyUrl || "官方授权链接");
+    linkNode.href = verifyUrl;
+    linkNode.target = "_blank";
+    linkNode.style.color = "#60a5fa";
+    linkNode.style.textDecoration = "underline";
+    linkNode.style.marginLeft = "6px";
+    info.append(linkNode);
+    statusBox.append(info);
+
+    if (userCode) {
+      const codeRow = el("div");
+      codeRow.style.marginBottom = "10px";
+      codeRow.append(document.createTextNode("用户确认码: "), el("b", null, userCode));
+      statusBox.append(codeRow);
+    }
+
+    const pollNotice = el("div", "form-hint", "正在等待浏览器端授权完成（后台自动轮询校验中）…");
+    statusBox.append(pollNotice);
+
+    // 尝试直接在浏览器新标签页打开授权页
+    if (verifyUrl) {
+      window.open(verifyUrl, "_blank");
+    }
+
+    // 轮询流程
+    if (oauthPollingTimer) clearInterval(oauthPollingTimer);
+
+    oauthPollingTimer = setInterval(async () => {
+      try {
+        const pollRes = await getJSON(`/api/v1/oauth/poll/${flowId}`);
+        const pollData = pollRes.data || {};
+        if (pollData.status === "ready") {
+          clearInterval(oauthPollingTimer);
+          statusBox.textContent = "";
+          const okDiv = el("div", "text-good", "✓ 官方授权成功！已自动获取并持久化 Coding Plan API Key 及重置卡凭据。");
+          statusBox.append(okDiv);
+          showToast("官方 OAuth 授权成功！", "success");
+          if (btn) btn.disabled = false;
+          load(true);
+          loadCredentials();
+          loadResetStatus();
+          loadProxyStatus();
+        } else if (pollData.status === "expired" || pollData.status === "error") {
+          clearInterval(oauthPollingTimer);
+          statusBox.textContent = "授权已失效或异常：" + (pollData.message || pollData.status);
+          if (btn) btn.disabled = false;
+          showToast("OAuth 授权失败：" + (pollData.message || pollData.status), "error");
+        }
+      } catch (_) {
+        // 网络抖动继续轮询
+      }
+    }, 2000);
+
+  } catch (err) {
+    if (statusBox) statusBox.textContent = "发起授权失败：" + err.message;
+    if (btn) btn.disabled = false;
+    showToast("发起授权失败: " + err.message, "error");
+  }
+}
+
+// ==================== 错误处理与全局加载 ====================
 function showErrors(errors) {
   const host = $("errors");
+  if (!host) return;
   host.textContent = "";
   if (!errors) return;
   for (const [section, err] of Object.entries(errors)) {
@@ -410,7 +953,7 @@ async function load(force) {
   if (inflight) return;
   inflight = true;
   const button = $("refresh");
-  button.disabled = true;
+  if (button) button.disabled = true;
   try {
     const body = await getJSON("/api/v1/overview" + (force ? "?refresh=1" : ""));
     const data = body.data || {};
@@ -420,34 +963,84 @@ async function load(force) {
     renderModels(data);
     renderPerformance(data);
     showErrors(body.meta && body.meta.errors);
-    $("updated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN");
-    $("banner").hidden = true;
+    if ($("updated")) $("updated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN");
+    if ($("banner")) $("banner").hidden = true;
   } catch (err) {
-    $("updated").textContent = "更新失败";
+    if ($("updated")) $("updated").textContent = "更新失败";
     const banner = $("banner");
-    banner.textContent = "加载失败：" + err.message;
-    banner.hidden = false;
+    if (banner) {
+      banner.textContent = "加载失败：" + err.message;
+      banner.hidden = false;
+    }
   } finally {
     inflight = false;
-    button.disabled = false;
+    if (button) button.disabled = false;
   }
 }
 
+// ==================== 启动主入口 ====================
 async function boot() {
+  setupTabs();
+  setupResetConfirmModal();
+  setupManualCredsModal();
+
+  const startOAuthBtn = $("btn-start-oauth");
+  if (startOAuthBtn) startOAuthBtn.onclick = startOAuthFlow;
+
+  const copyBtn = $("copy-endpoint-btn");
+  if (copyBtn) {
+    copyBtn.onclick = () => {
+      const url = $("proxy-endpoint-url")?.textContent;
+      if (url) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(url).then(() => {
+            showToast("本地代理端点已复制！", "success");
+          }).catch(() => fallbackCopy(url));
+        } else {
+          fallbackCopy(url);
+        }
+      }
+    };
+  }
+
   try {
     const health = await getJSON("/healthz");
     if (health.refreshSeconds) refreshSeconds = health.refreshSeconds;
     if (!health.token || !health.token.configured) {
       const banner = $("banner");
-      banner.textContent = "服务端未配置 bigmodel token：设置 BIGMODEL_TOKEN 环境变量，或把 JWT 写入 BIGMODEL_TOKEN_FILE 指向的文件。";
-      banner.hidden = false;
+      if (banner) {
+        banner.textContent = "服务端未检测到有效 API Key：请在「凭据与设置」中配置，或使用官方网页授权登录。";
+        banner.hidden = false;
+      }
     }
   } catch (_) { /* health is best effort */ }
 
   await load(false);
+  loadResetStatus();
+  loadProxyStatus();
+  loadCredentials();
   loadAccount(false);
-  $("refresh").addEventListener("click", () => { load(true); loadAccount(true); });
-  setInterval(() => { if (!document.hidden) load(false); }, refreshSeconds * 1000);
+
+  const refreshBtn = $("refresh");
+  if (refreshBtn) {
+    refreshBtn.addEventListener("click", () => {
+      load(true);
+      loadResetStatus();
+      loadProxyStatus();
+      loadCredentials();
+      loadAccount(true);
+      showToast("已刷新全部最新数据", "info");
+    });
+  }
+
+  setInterval(() => {
+    if (!document.hidden) {
+      load(false);
+      loadResetStatus();
+      loadProxyStatus();
+    }
+  }, refreshSeconds * 1000);
+
   setInterval(tickResets, 1000);
 }
 

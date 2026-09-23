@@ -123,6 +123,10 @@ class TTLCache:
     def __len__(self) -> int:
         return len(self._data)
 
+    def clear(self) -> None:
+        self._data.clear()
+        self._inflight.clear()
+
     def get(self, key: Hashable) -> Any | None:
         entry = self._data.get(key)
         if entry is None or entry.expires_at <= self._clock():
