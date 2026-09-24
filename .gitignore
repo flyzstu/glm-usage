@@ -1,14 +1,41 @@
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
+*$py.class
+
+# Testing & Coverage
 .pytest_cache/
+.ruff_cache/
 .coverage
 htmlcov/
+
+# Distribution / packaging
 dist/
 build/
 *.egg-info/
+
+# Environments
 .venv/
 venv/
+ENV/
+env/
 
-# 里面有 token，不要提交
+# Secrets, Tokens & Private Credentials (严防凭证与机密泄露)
 .env
+.env.*
+!.env.example
+*.token
+*.token.json
+*token*.json
+token
+secret.yaml
 k8s/secret.yaml
+*.key
+*.pem
+*.pfx
+*.crt
+
+# Internal & Private Deployment Configs
+.commandcode/
+.gitea/
+k8s/
